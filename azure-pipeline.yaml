@@ -1,0 +1,78 @@
+trigger:
+  branches:
+    include:
+      - master
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  awsRegion: 'ap-south-1'
+  awsCredentials: 'ECS_deploy'
+  awsAccessKeyId: 'AKIAUNXSNC27R2CBQ2R7'
+  awsSecretAccessKey: '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'
+  awsAccountId: '304377304767'
+  clusterName: 'springboot'
+  serviceName: 'newapp'
+  imageTag: 'latest'
+  imageRepository: 'springwebapp'
+
+stages:
+- stage: Docker
+  displayName: 'Build & Push Docker image to AWS ECR'
+  jobs:
+  - job: Build_and_Push
+    displayName: 'Build & Push Docker image'
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+
+    - task: Docker@2
+      displayName: 'Build an image'
+      inputs:
+        command: build
+        dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
+        buildContext: '$(Build.SourcesDirectory)'
+        repository: '$(imageRepository)'
+        tags: '$(imageTag)'
+
+    - script: |
+        echo "##vso[task.setvariable variable=imageName]$(imageRepository)"
+        echo "##vso[task.setvariable variable=sourceImageName]$(imageRepository)"
+      displayName: 'Set Image Name and Source Image Name'
+
+    - task: ECRPushImage@1
+      inputs:
+        awsCredentials: '$(awsCredentials)'
+        regionName: '$(awsRegion)'
+        sourceImageName: '$(sourceImageName)'
+        repositoryName: '$(imageRepository)'
+
+- stage: ECS
+  displayName: 'Deploy to ECS'
+  dependsOn: Docker
+  jobs:
+  - job: Deploy_to_ECS
+    displayName: 'Deploy to ECS'
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - script: |
+        aws configure set aws_access_key_id $(awsAccessKeyId)
+        aws configure set aws_secret_access_key $(awsSecretAccessKey)
+        aws configure set default.region $(awsRegion)
+      displayName: 'Configure AWS CLI'
+
+    - script: |
+        aws ecr get-login-password --region $(awsRegion) | docker login --username AWS --password-stdin $(awsAccountId).dkr.ecr.$(awsRegion).amazonaws.com
+        docker pull $(awsAccountId).dkr.ecr.$(awsRegion).amazonaws.com/$(imageRepository):$(imageTag)
+        $imageUri = "$(awsAccountId).dkr.ecr.$(awsRegion).amazonaws.com/$(imageRepository):$(imageTag)"
+        $imageDigest = docker inspect --format='{{index .RepoDigests 0}}' $imageUri
+        echo "##vso[task.setvariable variable=imageDigest]$imageDigest"
+      displayName: 'Pull Image from ECR and Retrieve Digest'
+
+    - script: |
+       aws ecs update-service --cluster $(clusterName) --service $(serviceName) --force-new-deployment --task-definition arn:aws:ecs:ap-south-1:304377304767:task-definition/springapp:1
+      displayName: 'Deploy to ECS Service'
+
